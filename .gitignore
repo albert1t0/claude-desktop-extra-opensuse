@@ -1,0 +1,10 @@
+# Artefactos de construcción (RPMs de ~180 MB, no versionar)
+dist/
+dist-native/
+*.rpm
+
+# Tarballs upstream de Claude Desktop
+*.tar.gz
+
+# Temporales de rpmbuild
+rpmbuild/
