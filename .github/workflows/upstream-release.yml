@@ -27,7 +27,8 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        # Pin to a full commit SHA for supply-chain safety (v4.4.0).
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install rpm tooling
         run: |
@@ -93,20 +94,24 @@ jobs:
           fi
           URL=$(jq -r .url <<<"$ASSET_JSON")
           DIGEST=$(jq -r '.digest // empty' <<<"$ASSET_JSON")
-          curl -fsSL -L -o "download/${TARBALL}" "$URL"
-          if [[ -n "$DIGEST" && "$DIGEST" != "null" ]]; then
-            EXPECTED="${DIGEST#sha256:}"
-            ACTUAL=$(sha256sum "download/${TARBALL}" | awk '{print $1}')
-            if [[ "$ACTUAL" != "$EXPECTED" ]]; then
-              echo "SHA-256 mismatch for ${TARBALL}" >&2
-              echo "expected: ${EXPECTED}" >&2
-              echo "actual:   ${ACTUAL}" >&2
-              exit 1
-            fi
-            echo "Verified SHA-256 ${ACTUAL}"
-          else
-            echo "Warning: upstream asset has no digest; skipping checksum verification" >&2
+          if [[ -z "$DIGEST" || "$DIGEST" == "null" ]]; then
+            echo "Upstream asset ${TARBALL} has no digest; refusing to publish without SHA-256 verification" >&2
+            exit 1
           fi
+          if [[ "$DIGEST" != sha256:* ]]; then
+            echo "Unsupported digest algorithm for ${TARBALL}: ${DIGEST}" >&2
+            exit 1
+          fi
+          curl -fsSL -L -o "download/${TARBALL}" "$URL"
+          EXPECTED="${DIGEST#sha256:}"
+          ACTUAL=$(sha256sum "download/${TARBALL}" | awk '{print $1}')
+          if [[ "$ACTUAL" != "$EXPECTED" ]]; then
+            echo "SHA-256 mismatch for ${TARBALL}" >&2
+            echo "expected: ${EXPECTED}" >&2
+            echo "actual:   ${ACTUAL}" >&2
+            exit 1
+          fi
+          echo "Verified SHA-256 ${ACTUAL}"
 
       - name: Build openSUSE RPM
         if: steps.skip.outputs.exists == 'false'

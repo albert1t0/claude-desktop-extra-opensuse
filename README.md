@@ -43,10 +43,11 @@ cuando aparece una versión nueva en
 El workflow [`.github/workflows/upstream-release.yml`](.github/workflows/upstream-release.yml):
 
 - se ejecuta cada 6 horas y también se puede lanzar a mano (`workflow_dispatch`);
-- toma el tag más reciente del origen (o un tag concreto si lo indiques);
+- toma el tag más reciente del origen (o un tag concreto si lo indicas);
 - omite el trabajo si este repo ya tiene una release con el mismo tag;
-- descarga el tarball `claude-desktop-VERSION-linux.tar.gz`, verifica su SHA-256,
-  construye el RPM con `scripts/build-rpm-opensuse.sh` y lo valida;
+- descarga el tarball `claude-desktop-VERSION-linux.tar.gz`, exige y verifica el
+  digest SHA-256 del asset upstream (falla si falta), construye el RPM con
+  `scripts/build-rpm-opensuse.sh` y lo valida;
 - publica el RPM y `rpm-info.txt` en una release con el mismo tag upstream
   (por ejemplo `v1.46388.2-3` → `claude-desktop-extra-1.46388.2-opensuse3.x86_64.rpm`).
 
