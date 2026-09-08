@@ -33,6 +33,41 @@ El objetivo no es publicar un repositorio openSUSE ni firmar paquetes
 automáticamente. La firma y la instalación deben gestionarse por separado,
 según la política del sistema que vaya a consumir el RPM.
 
+## Releases automáticas (GitHub Actions)
+
+Este repositorio publica RPMs openSUSE (`x86_64`) como
+[GitHub Releases](https://github.com/albert1t0/claude-desktop-extra-opensuse/releases)
+cuando aparece una versión nueva en
+[`patrickjaja/claude-desktop-extra`](https://github.com/patrickjaja/claude-desktop-extra/releases).
+
+El workflow [`.github/workflows/upstream-release.yml`](.github/workflows/upstream-release.yml):
+
+- se ejecuta cada 6 horas y también se puede lanzar a mano (`workflow_dispatch`);
+- toma el tag más reciente del origen (o un tag concreto si lo indicas);
+- omite el trabajo si este repo ya tiene una release con el mismo tag;
+- descarga el tarball `claude-desktop-VERSION-linux.tar.gz`, exige y verifica el
+  digest SHA-256 del asset upstream (falla si falta), construye el RPM con
+  `scripts/build-rpm-opensuse.sh` y lo valida;
+- publica el RPM y `rpm-info.txt` en una release con el mismo tag upstream
+  (por ejemplo `v1.46388.2-3` → `claude-desktop-extra-1.46388.2-opensuse3.x86_64.rpm`).
+
+Para forzar un tag concreto: en GitHub → **Actions** → **Upstream openSUSE RPM
+release** → **Run workflow** → campo `upstream_tag` (p. ej. `v1.46388.2-3`).
+Déjalo vacío para empaquetar la última release del origen.
+
+Instalación desde una release publicada:
+
+```bash
+TAG=v1.46388.2-3
+RPM=claude-desktop-extra-1.46388.2-opensuse3.x86_64.rpm
+curl -fsSL -O "https://github.com/albert1t0/claude-desktop-extra-opensuse/releases/download/${TAG}/${RPM}"
+sha256sum "$RPM"
+sudo zypper --non-interactive --no-gpg-checks install "./${RPM}"
+```
+
+El RPM generado **no está firmado**. No hay repositorio OBS/zypper; solo
+artefactos en GitHub Releases.
+
 ## Requisitos
 
 Instala las herramientas de construcción con los repositorios de openSUSE:

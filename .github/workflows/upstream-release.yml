@@ -1,0 +1,178 @@
+name: Upstream openSUSE RPM release
+
+on:
+  schedule:
+    # Check upstream every 6 hours.
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: 'Upstream tag to package (empty = latest)'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: upstream-opensuse-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      UPSTREAM_REPO: patrickjaja/claude-desktop-extra
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout
+        # Pin to a full commit SHA for supply-chain safety (v4.4.0).
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install rpm tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm
+
+      - name: Run unit tests
+        run: ./tests/run-tests.sh
+
+      - name: Resolve upstream tag
+        id: upstream
+        env:
+          INPUT_TAG: ${{ github.event.inputs.upstream_tag || '' }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${INPUT_TAG}" ]]; then
+            TAG="${INPUT_TAG}"
+          else
+            TAG=$(gh api "repos/${UPSTREAM_REPO}/releases/latest" --jq .tag_name)
+          fi
+          if [[ ! "$TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)(-([0-9]+))?$ ]]; then
+            echo "Unsupported upstream tag format: ${TAG}" >&2
+            exit 1
+          fi
+          VERSION="${BASH_REMATCH[1]}"
+          UPSTREAM_REL="${BASH_REMATCH[3]:-1}"
+          PKGREL="opensuse${UPSTREAM_REL}"
+          TARBALL="claude-desktop-${VERSION}-linux.tar.gz"
+          {
+            echo "tag=${TAG}"
+            echo "version=${VERSION}"
+            echo "pkgrel=${PKGREL}"
+            echo "tarball=${TARBALL}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Resolved upstream tag ${TAG} (version=${VERSION}, release=${PKGREL})"
+
+      - name: Skip if this repo already published the tag
+        id: skip
+        run: |
+          set -euo pipefail
+          TAG='${{ steps.upstream.outputs.tag }}'
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Release ${TAG} already exists in ${{ github.repository }}; skipping."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "No existing release for ${TAG}; continuing."
+          fi
+
+      - name: Download and verify upstream tarball
+        if: steps.skip.outputs.exists == 'false'
+        run: |
+          set -euo pipefail
+          TAG='${{ steps.upstream.outputs.tag }}'
+          TARBALL='${{ steps.upstream.outputs.tarball }}'
+          mkdir -p download
+          ASSET_JSON=$(gh api "repos/${UPSTREAM_REPO}/releases/tags/${TAG}" \
+            | jq -c --arg name "$TARBALL" \
+              '.assets[] | select(.name == $name) | {url: .browser_download_url, digest: .digest}')
+          if [[ -z "$ASSET_JSON" || "$ASSET_JSON" == "null" ]]; then
+            echo "Upstream release ${TAG} is missing asset ${TARBALL}" >&2
+            exit 1
+          fi
+          URL=$(jq -r .url <<<"$ASSET_JSON")
+          DIGEST=$(jq -r '.digest // empty' <<<"$ASSET_JSON")
+          if [[ -z "$DIGEST" || "$DIGEST" == "null" ]]; then
+            echo "Upstream asset ${TARBALL} has no digest; refusing to publish without SHA-256 verification" >&2
+            exit 1
+          fi
+          if [[ "$DIGEST" != sha256:* ]]; then
+            echo "Unsupported digest algorithm for ${TARBALL}: ${DIGEST}" >&2
+            exit 1
+          fi
+          curl -fsSL -L -o "download/${TARBALL}" "$URL"
+          EXPECTED="${DIGEST#sha256:}"
+          ACTUAL=$(sha256sum "download/${TARBALL}" | awk '{print $1}')
+          if [[ "$ACTUAL" != "$EXPECTED" ]]; then
+            echo "SHA-256 mismatch for ${TARBALL}" >&2
+            echo "expected: ${EXPECTED}" >&2
+            echo "actual:   ${ACTUAL}" >&2
+            exit 1
+          fi
+          echo "Verified SHA-256 ${ACTUAL}"
+
+      - name: Build openSUSE RPM
+        if: steps.skip.outputs.exists == 'false'
+        run: |
+          set -euo pipefail
+          ./scripts/build-rpm-opensuse.sh \
+            "download/${{ steps.upstream.outputs.tarball }}" \
+            ./dist \
+            '${{ steps.upstream.outputs.pkgrel }}'
+
+      - name: Validate RPM
+        if: steps.skip.outputs.exists == 'false'
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          RPMS=(./dist/claude-desktop-extra-*.rpm)
+          if [[ ${#RPMS[@]} -ne 1 ]]; then
+            echo "Expected exactly one RPM in ./dist, found ${#RPMS[@]}" >&2
+            ls -la ./dist >&2 || true
+            exit 1
+          fi
+          ./scripts/validate-rpm.sh "${RPMS[0]}"
+          echo "rpm_path=${RPMS[0]}" >> "$GITHUB_ENV"
+
+      - name: Publish GitHub Release
+        if: steps.skip.outputs.exists == 'false'
+        env:
+          TAG: ${{ steps.upstream.outputs.tag }}
+          VERSION: ${{ steps.upstream.outputs.version }}
+          PKGREL: ${{ steps.upstream.outputs.pkgrel }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          SHA256=$(awk -F= '/^SHA256=/{print $2}' dist/rpm-info.txt)
+          RPM_BASENAME=$(basename "$rpm_path")
+          NOTES_FILE=$(mktemp)
+          cat > "$NOTES_FILE" <<EOF
+          ## Claude Desktop Extra ${VERSION} para openSUSE
+
+          Paquete no oficial construido automáticamente desde
+          [\`${UPSTREAM_REPO}\` ${TAG}](https://github.com/${UPSTREAM_REPO}/releases/tag/${TAG}).
+
+          - Arquitectura: \`x86_64\`
+          - Release RPM: \`${PKGREL}\`
+          - Artefacto: \`${RPM_BASENAME}\`
+          - SHA-256: \`${SHA256}\`
+
+          ### Instalación
+
+          \`\`\`bash
+          curl -fsSL -O "https://github.com/${REPO}/releases/download/${TAG}/${RPM_BASENAME}"
+          sha256sum "${RPM_BASENAME}"
+          sudo zypper --non-interactive --no-gpg-checks install "./${RPM_BASENAME}"
+          \`\`\`
+
+          El RPM **no está firmado**. Verifica el checksum antes de instalarlo.
+          EOF
+          # Drop the common leading indentation introduced by the workflow YAML.
+          sed -i 's/^          //' "$NOTES_FILE"
+          gh release create "$TAG" \
+            --title "claude-desktop-extra ${VERSION} (openSUSE)" \
+            --notes-file "$NOTES_FILE" \
+            "$rpm_path" \
+            dist/rpm-info.txt
